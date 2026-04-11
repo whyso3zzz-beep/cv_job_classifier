@@ -2,6 +2,7 @@ import os
 import pickle
 import pandas as pd
 import numpy as np
+import warnings
 
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -9,6 +10,10 @@ from sklearn.svm import LinearSVC
 from sklearn.metrics import classification_report
 from sklearn.preprocessing import StandardScaler
 from scipy.sparse import hstack
+from lightgbm import LGBMClassifier
+from sklearn.metrics import classification_report
+
+warnings.filterwarnings("ignore")
 
 # 1. LOAD DATA
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -31,16 +36,29 @@ if "responsibilities.1" in df.columns:
 print("Clean xong:", df.shape)
 
 # 3. FEATURE ENGINEERING
+def count_skills(x):
+    try:
+        parsed = ast.literal_eval(x)
+        if isinstance(parsed, list):
+            return len(parsed)
+        return len(str(x).split())
+    except:
+        if ',' in str(x):
+            return len(str(x).split(','))
+        return len(str(x).split())
+
+df["num_skills"] = df["skills"].apply(count_skills)
+
 df["text"] = (
     df["skills"]*3 + " " +
     df["skills_required"]*2 + " " +
     df["responsibilities"] + " " +
     df["positions"] + " " +
     df["degree_names"] + " " +
-    df["major_field_of_studies"]
+    df["major_field_of_studies"] + " " +
+    df["positions"]
 )
 
-df["num_skills"] = df["skills"].apply(lambda x: len(x.split()))
 df["text_length"] = df["text"].apply(len)
 important_skills = ["python", "java", "sql"]
 
@@ -99,8 +117,17 @@ X_train = hstack([X_train_text, X_train_num])
 X_test = hstack([X_test_text, X_test_num])
 
 # 9. MODEL
-
-model = LinearSVC(C=0.5, max_iter=10000, class_weight={0:2, 1:1})
+model = LGBMClassifier(
+    class_weight='balanced', 
+    random_state=42,
+    n_jobs=-1,
+    verbose=-1,              # Ẩn các cảnh báo chẻ nhánh (gain: -inf)
+    learning_rate=0.03,
+    max_depth=20,
+    min_child_samples=30,
+    n_estimators=300,
+    num_leaves=50
+)
 model.fit(X_train, y_train)
     
 
