@@ -1,88 +1,91 @@
 import os
-import ast
+import pickle
+import fitz  # PyMuPDF
+import numpy as np
+import warnings
 import pandas as pd
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import StandardScaler
+
+from pathlib import Path
 from scipy.sparse import hstack
-from lightgbm import LGBMClassifier
-from sklearn.metrics import f1_score, make_scorer
 
-# 1. LOAD DATA & PREP (Giữ nguyên logic để đảm bảo data khớp 100%)
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-# Nhớ check lại đường dẫn này nếu file tune_params.py bạn để ở vị trí khác nhé
-data_path = os.path.join(BASE_DIR, "data", "resume_data.csv") 
+warnings.filterwarnings("ignore")
+# --- CẤU HÌNH ĐƯỜNG DẪN CHUẨN ---
+# Path(__file__) là file 'src/find.py'
+# .parent là thư mục 'src'
+# .parent.parent là thư mục gốc 'cv_job_classifier'
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-df = pd.read_csv(data_path)
-df = df.fillna("")
-df.columns = df.columns.str.replace('\ufeff', '').str.lower().str.strip()
-if "responsibilities.1" in df.columns:
-    df = df.drop(columns=["responsibilities.1"])
+# Trỏ thẳng vào thư mục model ở ngoài cùng (ngang hàng với src)
+MODEL_DIR = BASE_DIR / "model"
+INPUT_DIR = BASE_DIR / "input"
 
-def count_skills(x):
+def extract_text_from_pdf(pdf_path):
     try:
-        parsed = ast.literal_eval(x)
-        return len(parsed) if isinstance(parsed, list) else len(str(x).split())
-    except:
-        return len(str(x).split(',')) if ',' in str(x) else len(str(x).split())
+        doc = fitz.open(pdf_path)
+        text = " ".join([page.get_text() for page in doc])
+        return text.strip()
+    except Exception as e:
+        print(f"Lỗi đọc file {pdf_path.name}: {e}")
+        return None
 
-df["num_skills"] = df["skills"].apply(count_skills)
-df["text"] = (df["skills"]*3 + " " + df["skills_required"]*2 + " " + 
-              df["responsibilities"] + " " + df["positions"] + " " + 
-              df["degree_names"] + " " + df["major_field_of_studies"] + " " + df["positions"])
-df["text_length"] = df["text"].apply(len)
+def run_test():
+    # 1. Load các file từ thư mục /model/
+    try:
+        with open(MODEL_DIR / "model.pkl", "rb") as f:
+                model = pickle.load(f)
+        with open(MODEL_DIR / "vectorizer.pkl", "rb") as f:
+                vectorizer = pickle.load(f)
+        with open(MODEL_DIR / "scaler.pkl", "rb") as f:
+            scaler = pickle.load(f)        
+        # Nếu bạn có dùng scaler thì load thêm, không thì bỏ dòng dưới
+        # with open(MODEL_DIR / "scaler.pkl", "rb") as f:
+        #     scaler = pickle.load(f)
+        print(f"✅ Đã tải thành công model từ: {MODEL_DIR}")
+    except FileNotFoundError as e:
+        print(f"❌ Không tìm thấy file model. Kiểm tra lại đường dẫn: {e}")
+        return
+    # 2. Nhập Job Description
+    print("-" * 30)
+    job_desc = input("Nhập mô tả công việc để test: ")
+    print("-" * 30)
 
-for skill in ["python", "java", "sql"]:
-    df[f"has_{skill}"] = df["text"].apply(lambda x: 1 if skill in x.lower() else 0)
+   # 3. Quét PDF
+    pdf_files = list(INPUT_DIR.glob("*.pdf"))
+    for pdf_path in pdf_files:
+        cv_text = extract_text_from_pdf(pdf_path)
+        if not cv_text: continue
 
-df["label"] = df["matched_score"] > 0.5
-y = df["label"]
+        # --- BƯỚC QUAN TRỌNG: TẠO 9005 FEATURES ---
+        
+        # A. Xử lý văn bản (9000 features)
+        combined_text = f"{cv_text} {job_desc}"
+        X_text_sparse = vectorizer.transform([combined_text])
+        
+        # B. Trích xuất 5 đặc trưng số (như trong train.py)
+        # 1. num_skills (tạm tính bằng số từ trong cv_text chia cho một hệ số hoặc đếm dấu phẩy)
+        num_skills = cv_text.count(',') + 1 
+        # 2. text_length
+        text_length = len(combined_text)
+        # 3, 4, 5. has_python, has_java, has_sql
+        has_python = 1 if "python" in combined_text.lower() else 0
+        has_java = 1 if "java" in combined_text.lower() else 0
+        has_sql = 1 if "sql" in combined_text.lower() else 0
+        
+        # C. Scale 5 cột số này
+        num_data = pd.DataFrame([[num_skills, text_length, has_python, has_java, has_sql]], 
+                        columns=["num_skills", "text_length", "has_python", "has_java", "has_sql"])
+        X_num_scaled = scaler.transform(num_data)
+        
+        # D. Gộp lại thành 9005 cột (Dùng hstack như lúc train)
+        from scipy.sparse import hstack
+        X_final = hstack([X_text_sparse, X_num_scaled])
 
-X_train_text, X_test_text, y_train, y_test = train_test_split(df["text"], y, test_size=0.2, random_state=42, stratify=y)
-num_features = ["num_skills", "text_length", "has_python", "has_java", "has_sql"]
-X_train_num, X_test_num = train_test_split(df[num_features], test_size=0.2, random_state=42, stratify=y)
+        # 4. Dự đoán
+        probs = model.predict_proba(X_final)[0]
+        match_idx = list(model.classes_).index(True)
+        score = probs[match_idx] * 100
+        
+        print(f"{pdf_path.name:<25} | {score:>12.2f}% | {'Match' if score > 50 else 'No'}")
 
-vectorizer = TfidfVectorizer(max_features=9000, ngram_range=(1,2), min_df=2, max_df=0.9, stop_words="english", sublinear_tf=True)
-X_train_text = vectorizer.fit_transform(X_train_text)
-scaler = StandardScaler()
-X_train_num = scaler.fit_transform(X_train_num)
-X_train = hstack([X_train_text, X_train_num])
-
-# =====================================================================
-# 2. BẮT ĐẦU DÒ TÌM THÔNG SỐ CHO LIGHTGBM
-# =====================================================================
-print("Đang chạy Tuning, vui lòng đợi (khoảng 1-3 phút)...")
-
-# Mục tiêu: Tối ưu hóa F1-score cho lớp False
-f1_false_scorer = make_scorer(f1_score, pos_label=False)
-
-# Các thông số sẽ đem ra xào nấu ngẫu nhiên
-param_grid = {
-    'n_estimators': [100, 200, 300, 400],
-    'learning_rate': [0.01, 0.03, 0.05, 0.1],
-    'max_depth': [-1, 10, 20, 30],
-    'num_leaves': [31, 50, 80, 100],
-    'min_child_samples': [10, 20, 30, 40]
-}
-
-lgbm_base = LGBMClassifier(class_weight='balanced', random_state=42, n_jobs=-1)
-
-random_search = RandomizedSearchCV(
-    estimator=lgbm_base,
-    param_distributions=param_grid,
-    n_iter=30,               # Thử ngẫu nhiên 30 trường hợp
-    scoring=f1_false_scorer, 
-    cv=3,                    
-    verbose=1,
-    random_state=42,
-    n_jobs=-1
-)
-
-random_search.fit(X_train, y_train)
-
-print("\n" + "="*50)
-print("🎯 TÌM THẤY THÔNG SỐ TỐT NHẤT:")
-print("="*50)
-for param, value in random_search.best_params_.items():
-    print(f"{param}: {value}")
-print("="*50)
+if __name__ == "__main__":
+    run_test()

@@ -15,13 +15,13 @@ from sklearn.metrics import classification_report
 
 warnings.filterwarnings("ignore")
 
-# 1. LOAD DATA
+#
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 data_path = os.path.join(BASE_DIR, "data", "resume_data.csv")
 
 df = pd.read_csv(data_path)
 
-# 2. CLEAN DATA
+#
 df = df.fillna("")
 df.columns = df.columns.str.replace('\ufeff', '')
 df.columns = df.columns.str.lower().str.strip()
@@ -35,7 +35,7 @@ if "responsibilities.1" in df.columns:
 
 print("Clean xong:", df.shape)
 
-# 3. FEATURE ENGINEERING
+#FEATURE ENGINEERING
 def count_skills(x):
     try:
         parsed = ast.literal_eval(x)
@@ -67,11 +67,11 @@ for skill in important_skills:
         lambda x: 1 if skill in x.lower() else 0
     )
 
-# 4. LABEL
+#LABEL
 df["label"] = df["matched_score"] > 0.5
 y = df["label"]
 
-# 5. SPLIT TRƯỚC (QUAN TRỌNG)
+#SPLIT
 X_train_text, X_test_text, y_train, y_test = train_test_split(
     df["text"], y,
     test_size=0.2,
@@ -94,7 +94,7 @@ X_train_num, X_test_num = train_test_split(
     stratify=y
 )
 
-# 6. TF-IDF (fit trên TRAIN)
+#TF-IDF
 vectorizer = TfidfVectorizer(
     max_features=9000,
     ngram_range=(1,2),
@@ -107,21 +107,21 @@ vectorizer = TfidfVectorizer(
 X_train_text = vectorizer.fit_transform(X_train_text)
 X_test_text = vectorizer.transform(X_test_text)
 
-# 7. SCALE numeric (fit trên TRAIN)
+#SCALE numeric
 scaler = StandardScaler()
 X_train_num = scaler.fit_transform(X_train_num)
 X_test_num = scaler.transform(X_test_num)
 
-# 8. COMBINE
+#COMBINE
 X_train = hstack([X_train_text, X_train_num])
 X_test = hstack([X_test_text, X_test_num])
 
-# 9. MODEL
+#MODEL
 model = LGBMClassifier(
     class_weight='balanced', 
     random_state=42,
     n_jobs=-1,
-    verbose=-1,              # Ẩn các cảnh báo chẻ nhánh (gain: -inf)
+    verbose=-1,              #hide warning
     learning_rate=0.03,
     max_depth=20,
     min_child_samples=30,
@@ -129,17 +129,18 @@ model = LGBMClassifier(
     num_leaves=50
 )
 model.fit(X_train, y_train)
-    
 
-
-# 10. EVALUATE
+#EVALUATE
 accuracy = model.score(X_test, y_test)
 print("Accuracy:", accuracy)
 
 y_pred = model.predict(X_test)
 print(classification_report(y_test, y_pred))
 
-# 11. SAVE
+#SAVE
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(CURRENT_DIR)
 model_dir = os.path.join(BASE_DIR, "model")
 os.makedirs(model_dir, exist_ok=True)
 
