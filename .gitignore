@@ -1,1 +1,3 @@
 *.pkl
+src/find.py
+src/test.py
